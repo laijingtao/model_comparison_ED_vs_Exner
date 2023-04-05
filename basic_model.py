@@ -198,6 +198,7 @@ class BasicModel:
             self.model_state['sediment_thickness'] = (('x'), np.zeros(self.nx), {'units': 'm'})
             self.model_state['cover_factor'] = (('x'), np.zeros(self.nx), {'units': '1'})
             self.model_state['channel_width'] = (('x'), np.zeros(self.nx), {'units': 'm'})
+            self.model_state['drainage_area'] = (('x'), np.zeros(self.nx), {'units': 'm3'})
             self.model_state['sediment_load'] = (('x'), np.zeros(self.nx), {'units': 'm3 year-1', 'long_name': 'volumetric sediment transport rate'})
             self.model_state['sediment_load_per_unit_width'] = (('x'), np.zeros(self.nx), {'units': 'm2 year-1'})
             self.model_state['bedrock_erosion_rate'] = (('x'), np.zeros(self.nx), {'units': 'm year-1'})
@@ -212,6 +213,7 @@ class BasicModel:
         self.model_state['sediment_thickness'].data = self.sediment_thickness
         self.model_state['cover_factor'].data = self.cover_factor
         self.model_state['channel_width'].data = self.channel_width
+        self.model_state['drainage_area'].data = self.drainage_area
         self.model_state['sediment_load'].data = self.sediment_flux
         self.model_state['sediment_load_per_unit_width'].data = self.sediment_flux_per_unit_width
         self.model_state['bedrock_erosion_rate'].data = self.bedrock_erosion_rate
@@ -294,8 +296,16 @@ class ErosionDeposition(BasicModel):
         domain = self.core_nodes_and_downstream_end
         E_s = self.sediment_entrainment_rate
         D_s = self.sediment_deposition_rate
+        p = self.cover_factor
         
-        self.sediment_thickness[domain] += dt * (D_s[domain] - E_s[domain]) / (1-self.sediment_porosity)
+        if self.cover_factor_approach == 'SPACE':
+            p += 1e-3
+        if self.cover_factor_approach == 'MRSAA':
+            p = p*(1-self.cover_factor_lower)+self.cover_factor_lower
+        ## Note: the original SPACE model does not have p in this equation,
+        # but I think it might be wrong
+
+        self.sediment_thickness[domain] += dt * (D_s[domain] - E_s[domain]) / (1-self.sediment_porosity) / p[domain]
         
         if self.sediment_thickness[self.downstream_end] > self.downstream_end_limit:
             self.sediment_thickness[self.downstream_end] = self.downstream_end_limit
@@ -438,3 +448,12 @@ class ModelResults():
 def save_object(obj, filename):
     with open(filename, 'xb') as out_file:  # Fail if file exists.
         pickle.dump(obj, out_file, pickle.HIGHEST_PROTOCOL)
+
+
+def _speed_up(func):
+    """A conditional decorator that use numba to speed up the function"""
+    try:
+        import numba
+        return numba.njit(func, cache=True)
+    except ImportError:
+        return func
