@@ -78,20 +78,9 @@ class BasicModel:
         self.cover_factor_upper = 0.95
         
         self.bedrock_roughness_scale = 1
+
+        self.downstream_end_limit = self.bedrock_roughness_scale
         
-        try:
-            self.cover_factor_approach = kwargs['cover_factor_approach']
-            if self.cover_factor_approach not in ['SPACE', 'MRSAA']:
-                raise ValueError('cover_factor_approach has to be SPACE or MRSAA')
-        except KeyError:
-            self.cover_factor_approach = 'MRSAA'
-        
-        if self.cover_factor_approach == 'MRSAA':
-            self.downstream_end_limit = self.bedrock_roughness_scale * (1-self.cover_factor_lower) / (self.cover_factor_upper-self.cover_factor_lower)
-        else:
-            self.downstream_end_limit = self.bedrock_roughness_scale
-        
-        self.sediment_transport_capacity_per_unit_width = np.zeros(self.nx)
         self.sediment_flux_per_unit_width = np.zeros(self.nx)
         self.sediment_flux = np.zeros(self.nx)
         
@@ -153,16 +142,10 @@ class BasicModel:
         self.slope_s = np.dot(self.slope_matrix, self.sediment_thickness)
         self.slope = self.slope_r + self.slope_s
 
-    def update_cover_factor_space(self):
-        self.cover_factor = 1 - np.exp(-self.sediment_thickness/self.bedrock_roughness_scale)
-        
-    def update_cover_factor_mrsaa(self):
-        p0 = self.cover_factor_lower
-        p1 = self.cover_factor_upper
-        chi = self.sediment_thickness / self.bedrock_roughness_scale
-        self.cover_factor[np.where(chi > (1-p0)/(p1-p0))] = 1
-        self.cover_factor[np.where(chi <= (1-p0)/(p1-p0))] = p0 + (p1-p0)*chi[np.where(chi <= (1-p0)/(p1-p0))]
-        self.cover_factor = (self.cover_factor-p0) / (1-p0)
+    def update_cover_factor(self):
+        p = self.sediment_thickness / self.bedrock_roughness_scale
+        p[p > 1] = 1
+        self.cover_factor = p
         
     def update_bedrock_erosion_rate_stream_power(self):
         K_r = self.bedrock_erodibility_coefficient
@@ -296,15 +279,11 @@ class ErosionDeposition(BasicModel):
         domain = self.core_nodes_and_downstream_end
         E_s = self.sediment_entrainment_rate
         D_s = self.sediment_deposition_rate
-        p = self.cover_factor
-        
-        if self.cover_factor_approach == 'SPACE':
-            p += 1e-3
-        if self.cover_factor_approach == 'MRSAA':
-            p = p*(1-self.cover_factor_lower)+self.cover_factor_lower
+        p = self.cover_factor.copy()
         ## Note: the original SPACE model does not have p in this equation,
         # but I think it might be wrong
 
+        p = p*(1-self.cover_factor_lower) + self.cover_factor_lower
         self.sediment_thickness[domain] += dt * (D_s[domain] - E_s[domain]) / (1-self.sediment_porosity) / p[domain]
         
         if self.sediment_thickness[self.downstream_end] > self.downstream_end_limit:
@@ -327,10 +306,7 @@ class ErosionDeposition(BasicModel):
     
     def run_one_step(self, dt):
         self.update_slope()
-        if self.cover_factor_approach == 'MRSAA':
-            self.update_cover_factor_mrsaa()
-        elif self.cover_factor_approach == 'SPACE':
-            self.update_cover_factor_space()
+        self.update_cover_factor()
         self.update_sediment_flux()
         if self.bedrock_erosion_approach == 'stream-power':
             self.update_bedrock_erosion_rate_stream_power()
@@ -348,45 +324,31 @@ class ErosionDeposition(BasicModel):
 class ExnerType(BasicModel):
     def __init__(self, **kwargs):
         BasicModel.__init__(self, **kwargs)
-        
-        try:
-            self.chezy_resistance_coefficient = kwargs['chezy_resistance_coefficient']
-        except KeyError:
-            self.chezy_resistance_coefficient = 5
-            
-        self.shields_number = np.zeros(self.nx)
-        #self.threshold_shields_number = 0.0495
-        self.threshold_shields_number = 0.
-        self.flood_intermittency = 0.05
 
-    def update_shields_number(self):
-        domain = self.core_nodes_and_downstream_end
-        S = self.slope
-        aa = np.power(self.chezy_resistance_coefficient, 2) * self.g * np.power(self.channel_width[domain], 2)
-        bb = np.power(np.power(self.water_discharge[domain]/self.sec_per_year/self.flood_intermittency, 2)/aa, 1./3.)
-        cc = bb * np.power(S[domain], 2./3.) / (self.R * self.grain_size[domain])
-        self.shields_number[domain] = cc
+        try:
+            self.sediment_capacity_coefficient = kwargs['sediment_capacity_coefficient']
+        except KeyError:
+            self.sediment_capacity_coefficient = 1
+
+        self.CFL_limit = kwargs.get('CFL_limit', 0.5)
         
     def update_sediment_flux(self):
-        tmp_shields_number = self.shields_number.copy()
-        tmp_shields_number[np.where(tmp_shields_number < self.threshold_shields_number)] = self.threshold_shields_number
+        Q = self.water_discharge
+        S = self.slope
+        p = self.cover_factor
         
+        Qsc = self.sediment_capacity_coefficient*Q*S
+
         domain = self.core_nodes_and_downstream_end
-        self.sediment_transport_capacity_per_unit_width[domain] = 4 * np.sqrt(self.R * self.g * self.grain_size[domain]) \
-            * self.grain_size[domain] * np.power((tmp_shields_number[domain] - self.threshold_shields_number), 1.5)
-        self.sediment_transport_capacity_per_unit_width *= self.sec_per_year*self.flood_intermittency
+        self.sediment_flux[domain] = p[domain] * Qsc[domain]
+
+        self.sediment_flux[self.upstream_end] = self.sediment_feed_rate[self.upstream_end]
         
-        self.sediment_flux_per_unit_width = self.cover_factor * self.sediment_transport_capacity_per_unit_width
-        self.sediment_flux_per_unit_width[self.upstream_end] = self.sediment_feed_rate[self.upstream_end] / self.channel_width[self.upstream_end]
-        #self.sediment_flux_per_unit_width[self.downstream_end] = 1e9
-        self.sediment_flux = self.sediment_flux_per_unit_width * self.channel_width
+        self.sediment_flux_per_unit_width = self.sediment_flux / self.channel_width
         
     def update_sediment_thickness(self, dt):
-        p = self.cover_factor
-        if self.cover_factor_approach == 'SPACE':
-            p += 1e-3
-        if self.cover_factor_approach == 'MRSAA':
-            p = p*(1-self.cover_factor_lower)+self.cover_factor_lower
+        p = self.cover_factor.copy()
+        p = p*(1-self.cover_factor_lower) + self.cover_factor_lower
         
         domain = self.core_nodes_and_downstream_end
         #domain = self.core_nodes
@@ -400,54 +362,43 @@ class ExnerType(BasicModel):
         
         self.sediment_thickness[np.where(self.sediment_thickness < 0)] = 0
     
-    def run_one_step(self, dt):
-        self.update_slope()
-        if self.cover_factor_approach == 'MRSAA':
-            self.update_cover_factor_mrsaa()
-        elif self.cover_factor_approach == 'SPACE':
-            self.update_cover_factor_space()
-        self.update_shields_number()
-        self.update_sediment_flux()
+    def update_sediment_dynamics_numba(self, dt):
+        domain = self.core_nodes_and_downstream_end
+        S, p, H, Qs, qs = _exner_update_sediment_dynamics(
+            self.dx, dt, self.CFL_limit, self.sediment_capacity_coefficient, self.sediment_porosity,
+            self.bedrock_roughness_scale, self.cover_factor_lower,
+            self.bedrock_elevation, self.sediment_thickness, self.water_discharge,
+            self.channel_width, self.sediment_feed_rate, self.bedrock_erosion_rate,
+            self.slope_matrix, self.flux_gradient_matrix, domain, self.upstream_end
+        )
+
+        self.slope = S
+        self.cover_factor = p
+        self.sediment_thickness[domain] = H[domain]
+        self.sediment_flux = Qs
+        self.sediment_flux_per_unit_width[domain] = qs[domain]
+
+        if self.sediment_thickness[self.downstream_end] > self.downstream_end_limit:
+            self.sediment_thickness[self.downstream_end] = self.downstream_end_limit
+
+    def run_one_step(self, dt, use_numba=False):
+        if use_numba:
+            self.update_sediment_dynamics_numba(dt)
+        else:
+            self.update_slope()
+            self.update_cover_factor()
+            self.update_sediment_flux()
+            self.update_sediment_thickness(dt)
+
         if self.bedrock_erosion_approach == 'stream-power':
             self.update_bedrock_erosion_rate_stream_power()
         elif self.bedrock_erosion_approach == 'saltation-abrasion':
             self.update_bedrock_erosion_rate_saltation_abrasion()
-        
         #import pdb;pdb.set_trace()
         self.update_bedrock_elevation(dt)
-        self.update_sediment_thickness(dt)
-        
+        self.update_slope()
+            
         self.elevation = self.bedrock_elevation + self.sediment_thickness
-
-
-
-class Variable():
-    def __init__(self, value=np.array([]), time=np.array([]), unit=None):
-        self.value = value
-        self.time = time
-        self.unit = unit
-
-class ModelResults():
-    def __init__(self):
-        self.variables = {}
-
-    def add_field(self, field, unit=None):
-        self.variables[field] = Variable(unit=unit)
-
-    def add_value(self, field, z, t):
-        if field not in self.variables:
-            raise KeyError(field)
-        if len(self.variables[field].value) == 0:
-            self.variables[field].value = np.array([z])
-            self.variables[field].time = np.array([t])
-        else:
-            self.variables[field].value = np.append(self.variables[field].value, [z], axis=0)
-            self.variables[field].time = np.append(self.variables[field].time, t)
-
-
-def save_object(obj, filename):
-    with open(filename, 'xb') as out_file:  # Fail if file exists.
-        pickle.dump(obj, out_file, pickle.HIGHEST_PROTOCOL)
 
 
 def _speed_up(func):
@@ -457,3 +408,44 @@ def _speed_up(func):
         return numba.njit(func, cache=True)
     except ImportError:
         return func
+
+@_speed_up
+def _exner_update_sediment_dynamics(
+        dx, dt, cfl_limit, 
+        Ksc, phi, H_star, pl, R, H, Q, W, Qs_in, Er,
+        slope_A, flux_A, domain, upstream_end,
+    ):
+    q = Q/W
+    Kd = np.nanmax((Ksc*q)/(1-phi))
+    sub_dt = cfl_limit*(dx**2)/(2*Kd)
+
+    curr_t = 0
+    while curr_t < dt:
+        if sub_dt > dt - curr_t:
+            sub_dt = dt - curr_t
+        
+        S =  np.dot(slope_A, R+H)
+        
+        tmp_p = H/H_star
+        tmp_p[tmp_p > 1] = 1
+        
+        Qsc = Ksc*Q*S
+        Qs = tmp_p*Qsc
+        Qs[upstream_end] = Qs_in[upstream_end]
+        qs = Qs / W
+
+        tmp_p = tmp_p*(1-pl) + pl
+        
+        left_hand = -np.dot(flux_A, Qs)
+        left_hand += Er * W  # conserve mass over width not dx 
+        left_hand[domain] += Qs_in[domain]/dx # sediment_feed_rate[upstream_end] has been included in sediment_flux already
+        H[domain] += sub_dt*(left_hand[domain]/((1-phi)*(tmp_p[domain])*W[domain]))
+       
+        H[H < 0] = 0
+
+        p = H/H_star
+        p[p > 1] = 1
+
+        curr_t += sub_dt
+
+    return S, p, H, Qs, qs
