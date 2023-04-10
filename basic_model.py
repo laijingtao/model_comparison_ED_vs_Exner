@@ -132,6 +132,8 @@ class BasicModel:
             A_f[i, i+1]=1-au
         self.flux_gradient_matrix = A_f/self.dx
 
+        self.CFL_limit = kwargs.get('CFL_limit', 0.5)
+
         self.model_state = None
         self.update_model_state()
         
@@ -248,7 +250,6 @@ class ErosionDeposition(BasicModel):
             self.sediment_erodibility_coefficient = kwargs['sediment_erodibility_coefficient']
         except KeyError:
             self.sediment_erodibility_coefficient = 1e-2
-        self.sediment_entrainment_threshold = 0
         
         try:
             self.settling_velocity = kwargs['settling_velocity']
@@ -259,10 +260,9 @@ class ErosionDeposition(BasicModel):
         K_s = self.sediment_erodibility_coefficient
         q = self.water_discharge / self.channel_width
         S = self.slope
-        w_cs = self.sediment_entrainment_threshold
         p = self.cover_factor
         
-        tmp = (K_s * q * S - w_cs) * p
+        tmp = (K_s * q * S) * p
         domain = self.core_nodes_and_downstream_end
         self.sediment_entrainment_rate[domain] = tmp[domain]
     
@@ -304,22 +304,48 @@ class ErosionDeposition(BasicModel):
         #self.sediment_flux[self.downstream_end] = self.sediment_flux[-2]
         self.sediment_flux_per_unit_width = self.sediment_flux / self.channel_width
     
-    def run_one_step(self, dt):
-        self.update_slope()
-        self.update_cover_factor()
-        self.update_sediment_flux()
+    def update_sediment_dynamics_numba(self, dt):
+        domain = self.core_nodes_and_downstream_end
+        S, p, H, Qs, qs, Es, Ds = _ed_update_sediment_dynamics(
+            self.dx, dt, self.CFL_limit, self.sediment_erodibility_coefficient, self.settling_velocity, self.sediment_porosity,
+            self.bedrock_roughness_scale, self.cover_factor_lower,
+            self.bedrock_elevation, self.sediment_thickness, self.water_discharge,
+            self.channel_width, self.sediment_flux, self.sediment_feed_rate, self.bedrock_erosion_rate,
+            self.slope_matrix, domain, self.upstream_end
+        )
+
+        self.slope = S
+        self.cover_factor = p
+        self.sediment_thickness[domain] = H[domain]
+        self.sediment_flux = Qs
+        self.sediment_flux_per_unit_width[domain] = qs[domain]
+        self.sediment_entrainment_rate[domain] = Es[domain]
+        self.sediment_deposition_rate[domain] = Ds[domain]
+
+        if self.sediment_thickness[self.downstream_end] > self.downstream_end_limit:
+            self.sediment_thickness[self.downstream_end] = self.downstream_end_limit
+
+    def run_one_step(self, dt, use_numba=False):
+        if use_numba:
+            self.update_sediment_dynamics_numba(dt)
+        else:
+            self.update_slope()
+            self.update_cover_factor()
+            self.update_sediment_flux()
+            self.update_sediment_entrainment_rate()
+            self.update_sediment_deposition_rate()
+            self.update_sediment_thickness(dt)
+
         if self.bedrock_erosion_approach == 'stream-power':
             self.update_bedrock_erosion_rate_stream_power()
         elif self.bedrock_erosion_approach == 'saltation-abrasion':
             self.update_bedrock_erosion_rate_saltation_abrasion()
-        self.update_sediment_entrainment_rate()
-        self.update_sediment_deposition_rate()
-        
+        #import pdb;pdb.set_trace()
         self.update_bedrock_elevation(dt)
-        
-        self.update_sediment_thickness(dt)
-        
+        self.update_slope()
+
         self.elevation = self.bedrock_elevation + self.sediment_thickness
+        
         
 class ExnerType(BasicModel):
     def __init__(self, **kwargs):
@@ -329,8 +355,6 @@ class ExnerType(BasicModel):
             self.sediment_capacity_coefficient = kwargs['sediment_capacity_coefficient']
         except KeyError:
             self.sediment_capacity_coefficient = 1
-
-        self.CFL_limit = kwargs.get('CFL_limit', 0.5)
         
     def update_sediment_flux(self):
         Q = self.water_discharge
@@ -408,6 +432,48 @@ def _speed_up(func):
         return numba.njit(func, cache=True)
     except ImportError:
         return func
+
+@_speed_up
+def _ed_update_sediment_dynamics(
+        dx, dt, cfl_limit, 
+        Ks, V, phi, H_star, pl, R, H, Q, W, Qs, Qs_in, Er,
+        slope_A, domain, upstream_end,
+    ):
+    q = Q/W
+    u = np.nanmax(Ks*q)
+    sub_dt = cfl_limit*dx/u
+
+    curr_t = 0
+    while curr_t < dt:
+        if sub_dt > dt - curr_t:
+            sub_dt = dt - curr_t
+        
+        S =  np.dot(slope_A, R+H)
+
+        tmp_p = H/H_star
+        tmp_p[tmp_p > 1] = 1
+
+        Es = Ks * q * S * tmp_p
+        Ds = Qs/Q*V
+
+        tmp_p = tmp_p*(1-pl) + pl
+
+        H[domain] += sub_dt * (Ds[domain] - Es[domain]) / (1-phi) / tmp_p[domain]
+        H[H < 0] = 0
+
+        Qs[upstream_end] = Qs_in[upstream_end]
+        for i in domain:
+            Qs[i] = (Qs[i-1] + Es[i]*dx*W[i] + Er[i]*dx*W[i] + Qs_in[i])\
+                /(1+V*dx*W[i]/Q[i]) # conserve mass over width not dx 
+       
+        qs = Qs / W
+
+        p = H/H_star
+        p[p > 1] = 1
+
+        curr_t += sub_dt
+
+    return S, p, H, Qs, qs, Es, Ds
 
 @_speed_up
 def _exner_update_sediment_dynamics(
