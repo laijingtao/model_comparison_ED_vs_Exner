@@ -47,11 +47,11 @@ class BasicModel:
         try:
             drainage_area_distance_coefficient = kwargs['drainage_area_distance_coefficient']
         except KeyError:
-            drainage_area_distance_coefficient = 30
+            drainage_area_distance_coefficient = 1
         try:
             drainage_area_distance_exponent = kwargs['drainage_area_distance_exponent']
         except KeyError:
-            drainage_area_distance_exponent = 1.5
+            drainage_area_distance_exponent = 1/0.55
         self.drainage_area = drainage_area_distance_coefficient \
             * np.power(self.distance_downstream+np.power(drainage_area_head/drainage_area_distance_coefficient, 1./drainage_area_distance_exponent), drainage_area_distance_exponent)
         
