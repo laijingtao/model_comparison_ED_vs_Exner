@@ -186,6 +186,8 @@ class BasicModel:
             self.model_state['drainage_area'] = (('x'), np.zeros(self.nx), {'units': 'm3'})
             self.model_state['sediment_load'] = (('x'), np.zeros(self.nx), {'units': 'm3 year-1', 'long_name': 'volumetric sediment transport rate'})
             self.model_state['sediment_load_per_unit_width'] = (('x'), np.zeros(self.nx), {'units': 'm2 year-1'})
+            self.model_state['water_discharge'] = (('x'), np.zeros(self.nx), {'units': 'm3 year-1'})
+            self.model_state['water_flux_per_unit_width'] = (('x'), np.zeros(self.nx), {'units': 'm2 year-1'})
             self.model_state['bedrock_erosion_rate'] = (('x'), np.zeros(self.nx), {'units': 'm year-1'})
             self.model_state['sediment_entrainment_rate'] = (('x'), np.zeros(self.nx), {'units': 'm year-1'})
             self.model_state['sediment_deposition_rate'] = (('x'), np.zeros(self.nx), {'units': 'm year-1'})
@@ -201,6 +203,8 @@ class BasicModel:
         self.model_state['drainage_area'].data = self.drainage_area
         self.model_state['sediment_load'].data = self.sediment_flux
         self.model_state['sediment_load_per_unit_width'].data = self.sediment_flux_per_unit_width
+        self.model_state['water_discharge'].data = self.water_discharge
+        self.model_state['water_flux_per_unit_width'].data = self.water_discharge/self.channel_width
         self.model_state['bedrock_erosion_rate'].data = self.bedrock_erosion_rate
         try:
             self.model_state['sediment_entrainment_rate'].data = self.sediment_entrainment_rate
@@ -440,7 +444,7 @@ def _ed_update_sediment_dynamics(
         slope_A, domain, upstream_end,
     ):
     q = Q/W
-    u = np.nanmax(Ks*q)
+    u = np.nanmax((Ks*q)/(1-phi))
     sub_dt = cfl_limit*dx/u
 
     curr_t = 0
