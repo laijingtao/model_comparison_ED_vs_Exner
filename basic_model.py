@@ -309,9 +309,13 @@ class ErosionDeposition(BasicModel):
         self.sediment_flux_per_unit_width = self.sediment_flux / self.channel_width
     
     def update_sediment_dynamics_numba(self, dt):
+        if isinstance(self.settling_velocity, (float, int)):
+            V_list = np.zeros_like(self.bedrock_elevation) + self.settling_velocity
+        else:
+            V_list = self.settling_velocity
         domain = self.core_nodes_and_downstream_end
         S, p, H, Qs, qs, Es, Ds = _ed_update_sediment_dynamics(
-            self.dx, dt, self.CFL_limit, self.sediment_erodibility_coefficient, self.settling_velocity, self.sediment_porosity,
+            self.dx, dt, self.CFL_limit, self.sediment_erodibility_coefficient, V_list, self.sediment_porosity,
             self.bedrock_roughness_scale, self.cover_factor_lower,
             self.bedrock_elevation, self.sediment_thickness, self.water_discharge,
             self.channel_width, self.sediment_flux, self.sediment_feed_rate, self.bedrock_erosion_rate,
@@ -468,7 +472,7 @@ def _ed_update_sediment_dynamics(
         Qs[upstream_end] = Qs_in[upstream_end]
         for i in domain:
             Qs[i] = (Qs[i-1] + Es[i]*dx*W[i] + Er[i]*dx*W[i] + Qs_in[i])\
-                /(1+V*dx*W[i]/Q[i]) # conserve mass over width not dx 
+                /(1+V[i]*dx*W[i]/Q[i]) # conserve mass over width not dx 
        
         qs = Qs / W
 
